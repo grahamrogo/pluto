@@ -1,17 +1,43 @@
 import argparse
 import logging
-import aws, memory, recovery, filesystem
+from pathlib import Path
 import boto3
-import logging
 from memory import dump_memory
 
-def get_instance_ip(session, identifier, use_private_ip=False):
+def list_ec2_instances(session):
     """
-    Fetch the IP address of an EC2 instance based on name or partial ID.
+    List all running EC2 instances in the AWS account.
 
     Args:
         session (boto3.Session): AWS session object.
-        identifier (str): Name or partial ID of the instance.
+    """
+    ec2 = session.client('ec2')
+    try:
+        response = ec2.describe_instances(
+            Filters=[{'Name': 'instance-state-name', 'Values': ['running']}]
+        )
+        print(f"{'Instance ID':<20} {'Name':<30} {'Public IP':<15} {'Private IP':<15}")
+        print("-" * 80)
+        for reservation in response['Reservations']:
+            for instance in reservation['Instances']:
+                instance_id = instance['InstanceId']
+                public_ip = instance.get('PublicIpAddress', 'N/A')
+                private_ip = instance.get('PrivateIpAddress', 'N/A')
+                name_tag = next(
+                    (tag['Value'] for tag in instance.get('Tags', []) if tag['Key'] == 'Name'), 'N/A'
+                )
+                print(f"{instance_id:<20} {name_tag:<30} {public_ip:<15} {private_ip:<15}")
+    except Exception as e:
+        logging.error(f"Error listing instances: {e}")
+
+
+def get_instance_ip(session, identifier, use_private_ip=False):
+    """
+    Fetch the IP address of an EC2 instance based on name or instance ID.
+
+    Args:
+        session (boto3.Session): AWS session object.
+        identifier (str): Name or full instance ID of the instance.
         use_private_ip (bool): Whether to return the private IP (default: False for public IP).
 
     Returns:
@@ -19,43 +45,29 @@ def get_instance_ip(session, identifier, use_private_ip=False):
     """
     ec2 = session.client('ec2')
     try:
-        # Search for instance based on identifier
-        response = ec2.describe_instances(
-            Filters=[
-                {'Name': 'instance-state-name', 'Values': ['running']},
-                {
-                    'Name': 'tag:Name',
-                    'Values': [f"*{identifier}*"]  # Match partial name
-                }
-            ]
-        )
+        # Search for instance by either ID or name
+        filters = [{'Name': 'instance-state-name', 'Values': ['running']}]
+        
+        if identifier.startswith("i-"):  # Assume full instance ID
+            filters.append({'Name': 'instance-id', 'Values': [identifier]})
+        else:  # Assume name identifier
+            filters.append({'Name': 'tag:Name', 'Values': [f"*{identifier}*"]})
 
-        # Find the first matching instance
+        # Fetch instances matching the filters
+        response = ec2.describe_instances(Filters=filters)
+
+        # Find the first matching instance and return its IP
         for reservation in response.get('Reservations', []):
             for instance in reservation.get('Instances', []):
                 ip_field = 'PrivateIpAddress' if use_private_ip else 'PublicIpAddress'
                 ip_address = instance.get(ip_field)
                 if ip_address:
                     return ip_address
+        
         raise ValueError(f"No running instance found for identifier: {identifier}")
     except Exception as e:
         raise ValueError(f"Error fetching instance IP: {e}")
 
-
-def memory(identifier, key_file, region, output_dir, use_private_ip):
-    """Acquire memory dump from an EC2 instance."""
-    session = boto3.Session(region_name=region)
-
-    try:
-        # Fetch the instance IP
-        logging.info(f"Fetching IP for instance with identifier: {identifier}")
-        ip_address = get_instance_ip(session, identifier, use_private_ip)
-        logging.info(f"IP address for instance {identifier}: {ip_address}")
-
-        # Perform memory dump
-        dump_memory(identifier, ip_address, key_file, output_dir=output_dir)
-    except Exception as e:
-        logging.error(f"Memory acquisition failed: {e}")
 
 
 def resolve_instance_id(partial_id, session):
@@ -93,6 +105,36 @@ def resolve_instance_id(partial_id, session):
         raise ValueError(f"Error resolving instance ID: {e}")
 
 
+def memory_command(args, session):
+    """
+    Execute the memory acquisition command.
+
+    Args:
+        args (argparse.Namespace): Parsed arguments for the memory command.
+        session (boto3.Session): AWS session object.
+    """
+    try:
+        # Resolve partial or full instance ID
+        full_instance_id = resolve_instance_id(args.instance_id, session)
+        logging.info(f"Resolved partial ID '{args.instance_id}' to full ID '{full_instance_id}'")
+
+        # Fetch the instance IP
+        logging.info(f"Fetching IP for instance: {full_instance_id}")
+        ip_address = get_instance_ip(session, full_instance_id, args.use_private_ip)
+        logging.info(f"IP address for instance {full_instance_id}: {ip_address}")
+
+        # Perform memory dump
+        logging.info("Initiating memory acquisition...")
+        dump_memory(
+            instance_id=full_instance_id,
+            ip_address=ip_address,
+            key_file=args.key_file,
+            output_dir=args.output_dir
+        )
+    except Exception as e:
+        logging.error(f"Memory acquisition failed: {e}")
+
+
 def main():
     # Main parser
     parser = argparse.ArgumentParser(
@@ -118,23 +160,13 @@ def main():
         '-i', '--instance-id', required=True, help="Partial or full EC2 Instance ID"
     )
     memory_parser.add_argument(
+        '-k', '--key-file', required=True, help="Path to the SSH private key file"
+    )
+    memory_parser.add_argument(
         '-o', '--output-dir', default="memory_dumps", help="Local directory to store memory dumps"
     )
-
-    # Subcommand: Recover deleted files
-    recover_parser = subparsers.add_parser(
-        'recover', help="Recover deleted files from a snapshot"
-    )
-    recover_parser.add_argument(
-        '-s', '--snapshot-id', required=True, help="Snapshot ID for recovery"
-    )
-
-    # Subcommand: Analyze filesystem
-    analyze_parser = subparsers.add_parser(
-        'analyze', help="Analyze the filesystem of a specific EC2 instance"
-    )
-    analyze_parser.add_argument(
-        '-i', '--instance-id', required=True, help="Partial or full EC2 Instance ID"
+    memory_parser.add_argument(
+        '--use-private-ip', action='store_true', help="Use private IP instead of public IP"
     )
 
     # Parse arguments
@@ -144,35 +176,11 @@ def main():
     logging.basicConfig(level=logging.INFO)
 
     # Execute the selected command
-    session = aws.get_aws_session(args.region)
+    session = boto3.Session(region_name=args.region)
     if args.command == 'list':
-        aws.list_ec2_instances(session)
+        list_ec2_instances(session)
     elif args.command == 'memory':
-        try:
-            # Resolve partial instance ID
-            full_instance_id = resolve_instance_id(args.instance_id, session)
-            logging.info(f"Resolved partial ID '{args.instance_id}' to full ID '{full_instance_id}'")
-            
-            # Perform memory dump
-            memory.dump_memory(
-                instance_id=full_instance_id,
-                session=session,
-                output_dir=args.output_dir
-            )
-        except ValueError as e:
-            logging.error(e)
-    elif args.command == 'recover':
-        recovery.recover_deleted_files(args.snapshot_id)
-    elif args.command == 'analyze':
-        try:
-            # Resolve partial instance ID
-            full_instance_id = resolve_instance_id(args.instance_id, session)
-            logging.info(f"Resolved partial ID '{args.instance_id}' to full ID '{full_instance_id}'")
-            
-            # Perform filesystem analysis
-            filesystem.analyze_filesystem(full_instance_id)
-        except ValueError as e:
-            logging.error(e)
+        memory_command(args, session)
     else:
         parser.print_help()
 

@@ -106,10 +106,10 @@ def remote_file_exists(sftp, path):
         return False
 
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    instance_id = "i-0a1b2c3d4e5f6g7h8"
-    ip_address = "44.204.232.168"
-    key_file = "/Users/grahamrogozinski/pluto/aws-config/test.pem"
-    output_dir = "memory_dumps"
-    dump_memory(instance_id, ip_address, key_file, output_dir)
+# if __name__ == "__main__":
+#     logging.basicConfig(level=logging.INFO)
+#     instance_id = "i-0a1b2c3d4e5f6g7h8"
+#     ip_address = "44.204.232.168"
+#     key_file = "/Users/grahamrogozinski/pluto/aws-config/test.pem"
+#     output_dir = "memory_dumps"
+#     dump_memory(instance_id, ip_address, key_file, output_dir)
