@@ -3,13 +3,12 @@ import logging
 from pathlib import Path
 import boto3
 from memory import dump_memory
+from filesystem import list_drives, acquire_filesystem_image
+
 
 def list_ec2_instances(session):
     """
     List all running EC2 instances in the AWS account.
-
-    Args:
-        session (boto3.Session): AWS session object.
     """
     ec2 = session.client('ec2')
     try:
@@ -34,29 +33,18 @@ def list_ec2_instances(session):
 def get_instance_ip(session, identifier, use_private_ip=False):
     """
     Fetch the IP address of an EC2 instance based on name or instance ID.
-
-    Args:
-        session (boto3.Session): AWS session object.
-        identifier (str): Name or full instance ID of the instance.
-        use_private_ip (bool): Whether to return the private IP (default: False for public IP).
-
-    Returns:
-        str: IP address of the instance.
     """
     ec2 = session.client('ec2')
     try:
-        # Search for instance by either ID or name
         filters = [{'Name': 'instance-state-name', 'Values': ['running']}]
         
-        if identifier.startswith("i-"):  # Assume full instance ID
+        if identifier.startswith("i-"):
             filters.append({'Name': 'instance-id', 'Values': [identifier]})
-        else:  # Assume name identifier
+        else:
             filters.append({'Name': 'tag:Name', 'Values': [f"*{identifier}*"]})
 
-        # Fetch instances matching the filters
         response = ec2.describe_instances(Filters=filters)
 
-        # Find the first matching instance and return its IP
         for reservation in response.get('Reservations', []):
             for instance in reservation.get('Instances', []):
                 ip_field = 'PrivateIpAddress' if use_private_ip else 'PublicIpAddress'
@@ -69,17 +57,9 @@ def get_instance_ip(session, identifier, use_private_ip=False):
         raise ValueError(f"Error fetching instance IP: {e}")
 
 
-
 def resolve_instance_id(partial_id, session):
     """
     Resolve a partial instance ID to the full ID.
-
-    Args:
-        partial_id (str): Partial or full EC2 Instance ID.
-        session (boto3.Session): AWS session object.
-
-    Returns:
-        str: The full EC2 Instance ID if found, else raises an error.
     """
     ec2 = session.client('ec2')
 
@@ -87,7 +67,6 @@ def resolve_instance_id(partial_id, session):
         response = ec2.describe_instances()
         matching_instances = []
 
-        # Search for instances with matching IDs
         for reservation in response['Reservations']:
             for instance in reservation['Instances']:
                 instance_id = instance['InstanceId']
@@ -108,22 +87,14 @@ def resolve_instance_id(partial_id, session):
 def memory_command(args, session):
     """
     Execute the memory acquisition command.
-
-    Args:
-        args (argparse.Namespace): Parsed arguments for the memory command.
-        session (boto3.Session): AWS session object.
     """
     try:
-        # Resolve partial or full instance ID
         full_instance_id = resolve_instance_id(args.instance_id, session)
         logging.info(f"Resolved partial ID '{args.instance_id}' to full ID '{full_instance_id}'")
 
-        # Fetch the instance IP
-        logging.info(f"Fetching IP for instance: {full_instance_id}")
         ip_address = get_instance_ip(session, full_instance_id, args.use_private_ip)
         logging.info(f"IP address for instance {full_instance_id}: {ip_address}")
 
-        # Perform memory dump
         logging.info("Initiating memory acquisition...")
         dump_memory(
             instance_id=full_instance_id,
@@ -135,8 +106,37 @@ def memory_command(args, session):
         logging.error(f"Memory acquisition failed: {e}")
 
 
+def filesystem_command(args, session):
+    """
+    Execute the filesystem-related commands (list-drives or acquire).
+    """
+    try:
+        full_instance_id = resolve_instance_id(args.instance_id, session)
+        logging.info(f"Resolved partial ID '{args.instance_id}' to full ID '{full_instance_id}'")
+
+        ip_address = get_instance_ip(session, full_instance_id, args.use_private_ip)
+        logging.info(f"IP address for instance {full_instance_id}: {ip_address}")
+
+        if args.fs_command == 'list-drives':
+            logging.info("Listing drives...")
+            drives = list_drives(ip_address, args.key_file)
+            print("Available drives:")
+            for drive in drives:
+                print(drive)
+        elif args.fs_command == 'acquire':
+            logging.info("Acquiring filesystem image...")
+            acquire_filesystem_image(
+                instance_id=full_instance_id,
+                ip_address=ip_address,
+                key_file=args.key_file,
+                target_disk=args.target_disk,
+                output_dir=args.output_dir
+            )
+    except Exception as e:
+        logging.error(f"Filesystem operation failed: {e}")
+
+
 def main():
-    # Main parser
     parser = argparse.ArgumentParser(
         description="Pluto - Cloud Forensics Tool for AWS EC2 Instances"
     )
@@ -146,13 +146,10 @@ def main():
         default=None
     )
 
-    # Subparsers for specific tasks
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # Subcommand: List EC2 instances
     subparsers.add_parser('list', help="List all EC2 instances in the specified region")
 
-    # Subcommand: Memory dump
     memory_parser = subparsers.add_parser(
         'memory', help="Dump memory of a specific EC2 instance"
     )
@@ -169,18 +166,34 @@ def main():
         '--use-private-ip', action='store_true', help="Use private IP instead of public IP"
     )
 
-    # Parse arguments
+    fs_parser = subparsers.add_parser(
+        'filesystem', help="Filesystem-related operations"
+    )
+    fs_subparsers = fs_parser.add_subparsers(dest="fs_command", required=True)
+    
+    list_drives_parser = fs_subparsers.add_parser('list-drives', help="List drives on an EC2 instance")
+    list_drives_parser.add_argument('-i', '--instance-id', required=True, help="Instance ID")
+    list_drives_parser.add_argument('-k', '--key-file', required=True, help="SSH private key file")
+    list_drives_parser.add_argument('--use-private-ip', action='store_true', help="Use private IP")
+
+    acquire_fs_parser = fs_subparsers.add_parser('acquire', help="Acquire filesystem image")
+    acquire_fs_parser.add_argument('-i', '--instance-id', required=True, help="Instance ID")
+    acquire_fs_parser.add_argument('-k', '--key-file', required=True, help="SSH private key file")
+    acquire_fs_parser.add_argument('-t', '--target-disk', required=True, help="Target disk to image")
+    acquire_fs_parser.add_argument('-o', '--output-dir', default="filesystem_images", help="Directory to store images")
+    acquire_fs_parser.add_argument('--use-private-ip', action='store_true', help="Use private IP")
+
     args = parser.parse_args()
 
-    # Setup logging
     logging.basicConfig(level=logging.INFO)
-
-    # Execute the selected command
     session = boto3.Session(region_name=args.region)
+
     if args.command == 'list':
         list_ec2_instances(session)
     elif args.command == 'memory':
         memory_command(args, session)
+    elif args.command == 'filesystem':
+        filesystem_command(args, session)
     else:
         parser.print_help()
 

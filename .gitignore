@@ -1,2 +1,4 @@
 aws-config/
 memory_dumps/
+filesystem_images/
+pluto/__pycache__/
