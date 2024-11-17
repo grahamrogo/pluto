@@ -4,6 +4,8 @@ from pathlib import Path
 import boto3
 from memory import dump_memory
 from filesystem import list_drives, acquire_filesystem_image
+from analyze import run_sleuthkit_analysis
+
 
 
 def list_ec2_instances(session):
@@ -183,6 +185,21 @@ def main():
     acquire_fs_parser.add_argument('-o', '--output-dir', default="filesystem_images", help="Directory to store images")
     acquire_fs_parser.add_argument('--use-private-ip', action='store_true', help="Use private IP")
 
+    
+
+    # Subcommand: Full Sleuth Kit analysis
+    analyze_fs_parser = subparsers.add_parser(
+        'analyze-fs-full', help="Run full Sleuth Kit analysis on a filesystem image"
+    )
+    analyze_fs_parser.add_argument(
+        '-f', '--image-file', required=True, help="Path to the filesystem image"
+    )
+    analyze_fs_parser.add_argument(
+        '-o', '--output-file', default="filesystem_report.txt", help="File to save the analysis report"
+    )
+
+
+
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -194,6 +211,8 @@ def main():
         memory_command(args, session)
     elif args.command == 'filesystem':
         filesystem_command(args, session)
+    elif args.command == "analyze-fs-full":
+        run_sleuthkit_analysis(args.image_file, args.output_file)
     else:
         parser.print_help()
 
